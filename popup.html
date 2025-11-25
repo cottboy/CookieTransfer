@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cookie Transfer</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-size: 13px;
+        margin: 10px;
+        min-width: 260px;
+        text-align: center;
+      }
+
+      button {
+        padding: 6px 10px;
+        margin: 4px 0;
+        font-size: 13px;
+        min-width: 220px;
+      }
+
+      #status {
+        margin-top: 8px;
+        min-height: 16px;
+        color: #333;
+      }
+
+      #fileInput {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Cookie Transfer</h3>
+
+    <div>
+      <button id="exportBtn">导出Cookies</button>
+    </div>
+
+    <div>
+      <button id="importBtn">导入Cookies</button>
+      <input type="file" id="fileInput" accept="application/json" />
+    </div>
+
+    <div id="status"></div>
+
+    <script src="popup.js"></script>
+  </body>
+  </html>
