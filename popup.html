@@ -38,10 +38,18 @@
         resize: vertical;
       }
 
-      #scope {
+      #scope,
+      #conc {
+        display: block;
         width: 260px;
         margin: 6px auto 2px;
         text-align: left;
+        font-size: 12px;
+      }
+
+      #concurrency {
+        width: 52px;
+        margin-left: 6px;
         font-size: 12px;
       }
 
@@ -89,6 +97,14 @@
         id="siteList"
         placeholder="要迁移的网址，一行一个。留空就只用上面自动收集的。"
       ></textarea>
+
+      <label id="conc">
+        同时干活的数量
+        <input type="number" id="concurrency" min="1" max="12" step="1" value="3" />
+      </label>
+      <div class="hint">
+        后台同时开几个页面一起搬。网站多、每个网站存的东西大，调高确实更快，但内存会成倍涨。
+      </div>
 
       <div class="hint">
         网站数据 = 每个网站的本地存储 + 它的数据库（IndexedDB，含文件）。<br />

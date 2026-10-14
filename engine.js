@@ -5,7 +5,9 @@ const CDP = "1.3";
 const FAKE_HTML =
   '<!doctype html><html><head><meta charset="utf-8"><title>Cookie Transfer</title></head><body></body></html>';
 const FEED_SIZE = 1024 * 1024;
-const WORKER_COUNT = 3;
+const WORKER_MIN = 1;
+const WORKER_MAX = 12;
+const WORKER_DEFAULT = 3;
 const NAV_TIMEOUT = 20000;
 const DUMP_TIMEOUT = 300000;
 const FAILURE_LIMIT = 200;
@@ -25,7 +27,7 @@ class WorkerTab {
   constructor(tabId) {
     this.tabId = tabId;
     this.ctx = null;
-    this.wantOrigin = null;
+    this.origin = null;
     this.onReady = null;
   }
 
@@ -60,10 +62,11 @@ class WorkerTab {
     } catch {}
   }
 
-  // 让浏览器"进入"某个网站的页面：地址是它的，内容是假的
+  // 让浏览器"进入"某个网站的页面：地址是它的，内容是假的。
+  // 返回文档真正落在哪个地址上（新旧地址可能被浏览器改写），不用再额外问一次。
   async goto(origin) {
-    this.wantOrigin = origin;
     this.ctx = null;
+    this.origin = null;
     const committed = new Promise((resolve, reject) => {
       this.onReady = resolve;
       this.onFail = reject;
@@ -75,6 +78,7 @@ class WorkerTab {
     }
     await committed;
     this.onReady = null;
+    return this.origin;
   }
 
   async evaluate(expression, { awaitPromise = false, timeout = 0 } = {}) {
@@ -102,8 +106,11 @@ class WorkerTab {
   handleEvent(method, params) {
     if (method === "Runtime.executionContextCreated") {
       const c = params.context;
-      if (c.origin === this.wantOrigin && this.onReady) {
+      // 只认普通网站地址的文档；about:blank 之类不算"进到了网站里"。
+      // 记下文档真正落在哪个地址，浏览器可能把 http 改写成一个不存在的 https 子域。
+      if (this.onReady && /^https?:/.test(c.origin)) {
         this.ctx = c.id;
+        this.origin = c.origin;
         const resolve = this.onReady;
         this.onReady = null;
         resolve();
@@ -360,6 +367,7 @@ async function pageDump() {
   window.__CT_PARTS = parts;
   meta.bytes = text.length;
   meta.blobBytes = blobBytes;
+  meta.partCount = parts.length;
   return meta;
 }
 
@@ -454,7 +462,6 @@ async function pageRestore() {
   }
 
   const entry = JSON.parse(window.__CT_ACC);
-  window.__CT_ACC = "";
 
   const result = { localStorage: 0, databases: 0, records: 0, notes: [] };
 
@@ -533,10 +540,19 @@ class Pool {
   }
 }
 
+// 并发数由用户在界面上调，导出和导入都从这里取
+async function poolSize() {
+  const { concurrency } = await chrome.storage.local.get("concurrency");
+  const n = Math.floor(Number(concurrency));
+  if (!Number.isFinite(n)) return WORKER_DEFAULT;
+  return Math.min(WORKER_MAX, Math.max(WORKER_MIN, n));
+}
+
 // 开几个后台标签；第一个都开不起来就直接报错，开起来几个就用几个
 async function makePool() {
+  const wanted = await poolSize();
   const pool = new Pool();
-  for (let i = 0; i < WORKER_COUNT; i++) {
+  for (let i = 0; i < wanted; i++) {
     try {
       pool.free.push(await WorkerTab.create(engineWindowId));
     } catch (e) {
@@ -601,8 +617,7 @@ async function runExport(payload) {
         }
         report(origin);
         try {
-          await w.goto(origin);
-          const actual = await w.evaluate("location.origin");
+          const actual = await w.goto(origin);
           if (captured.has(actual)) continue;
           captured.add(actual);
           scanned++;
@@ -610,17 +625,11 @@ async function runExport(payload) {
           const meta = await w.evaluate(`(${pageDump.toString()})()`, { awaitPromise: true, timeout: DUMP_TIMEOUT });
           for (const n of meta.notes || []) failure.add(actual + "：" + n);
 
-          if (meta.localStorage + meta.databases === 0) {
-            // 这个网站什么都没存，连内容都不用从页面里取
-            await w.evaluate("delete window.__CT_PARTS");
-            continue;
-          }
+          if (meta.localStorage + meta.databases === 0) continue;
 
-          const count = await w.evaluate("window.__CT_PARTS ? window.__CT_PARTS.length : 0");
           // 先整段收齐再交出去，否则几个网站同时写会互相穿插
           const pieces = [];
-          for (let i = 0; i < count; i++) pieces.push(await w.evaluate(`window.__CT_PARTS[${i}]`));
-          await w.evaluate("delete window.__CT_PARTS");
+          for (let i = 0; i < meta.partCount; i++) pieces.push(await w.evaluate(`window.__CT_PARTS[${i}]`));
           bodies.push(pieces);
 
           stats.sites += 1;
@@ -715,9 +724,11 @@ async function runImport() {
 
       await w.goto(entry.origin);
       const text = JSON.stringify(entry);
-      await w.evaluate("window.__CT_ACC = ''");
-      for (let i = 0; i < text.length; i += FEED_SIZE) {
-        await w.evaluate("__CT_ACC += " + JSON.stringify(text.slice(i, i + FEED_SIZE)));
+      // 第一段直接赋值，后面再往后接，省一次来回
+      for (let i = 0, n = 0; i < text.length; i += FEED_SIZE, n++) {
+        await w.evaluate(
+          (n ? "__CT_ACC += " : "window.__CT_ACC = ") + JSON.stringify(text.slice(i, i + FEED_SIZE))
+        );
       }
       const r = await w.evaluate(`(${pageRestore.toString()})()`, { awaitPromise: true });
       stats.sites += 1;

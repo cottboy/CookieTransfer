@@ -99,21 +99,40 @@ document.getElementById("fileInput").addEventListener("change", (event) => {
 
 // 把选好的范围记下来，下次打开弹窗还在
 const scopeInputs = {
-  useBrowserList: document.getElementById("useBrowserList"),
-  siteList: document.getElementById("siteList"),
+  useBrowserList: {
+    el: document.getElementById("useBrowserList"),
+    apply: (el, v) => (el.checked = v),
+    value: (el) => el.checked,
+  },
+  siteList: {
+    el: document.getElementById("siteList"),
+    apply: (el, v) => (el.value = v),
+    value: (el) => el.value,
+  },
+  concurrency: {
+    el: document.getElementById("concurrency"),
+    apply: (el, v) => (el.value = v),
+    value: (el) => Number(el.value) || 3,
+  },
 };
 
-chrome.storage.local.get(["useBrowserList", "siteList"], (saved) => {
-  if (saved.useBrowserList !== undefined) scopeInputs.useBrowserList.checked = saved.useBrowserList;
-  if (saved.siteList !== undefined) scopeInputs.siteList.value = saved.siteList;
+chrome.storage.local.get(Object.keys(scopeInputs), (saved) => {
+  for (const [key, item] of Object.entries(scopeInputs)) {
+    if (saved[key] !== undefined) item.apply(item.el, saved[key]);
+  }
 });
 
-for (const [key, el] of Object.entries(scopeInputs)) {
-  el.addEventListener("change", () => {
-    chrome.storage.local.set({ [key]: key === "siteList" ? el.value : el.checked }, () => {
+for (const [key, item] of Object.entries(scopeInputs)) {
+  item.el.addEventListener("change", () => {
+    chrome.storage.local.set({ [key]: item.value(item.el) }, () => {
       // 清单可能长达几 MB，装不下时必须说清楚，不能默默丢掉
       if (chrome.runtime.lastError) {
-        setStatus("这份清单太长，扩展自己的存储装不下（上限约 10MB），所以没帮你记住；这次导出还是按框里的内容跑。", true);
+        setStatus(
+          key === "siteList"
+            ? "这份清单太长，扩展自己的存储装不下（上限约 10MB），所以没帮你记住；这次导出还是按框里的内容跑。"
+            : "这个设置没能存下来：" + chrome.runtime.lastError.message,
+          true
+        );
       }
     });
   });
@@ -160,8 +179,8 @@ document.getElementById("exportDataBtn").addEventListener("click", async () => {
     type: "siteData:run",
     op: "export",
     payload: {
-      useBrowserList: scopeInputs.useBrowserList.checked,
-      manualText: scopeInputs.siteList.value,
+      useBrowserList: scopeInputs.useBrowserList.el.checked,
+      manualText: scopeInputs.siteList.el.value,
     },
   });
 });
