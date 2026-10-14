@@ -1,4 +1,7 @@
 ﻿// 后台 service worker：负责导出 / 导入 Cookie 的主要逻辑
+// 网站数据（本地存储、IndexedDB）不在这里做，那是处理页 engine.js 的活，这里只管把它开起来。
+
+const ENGINE_URL = "engine.html";
 
 // 从 cookie 对象构造用于 chrome.cookies.set 的 URL
 function buildCookieUrl(cookie) {
@@ -175,5 +178,61 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
 
+  if (type === "ensureEngine") {
+    ensureEngine()
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: String(error) }));
+    return true;
+  }
+
   return false;
 });
+
+// 等处理页广播某条消息，等不到就报错
+function waitForBroadcast(type, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      chrome.runtime.onMessage.removeListener(listener);
+      reject(new Error("处理页没有响应，请重新加载插件后再试"));
+    }, timeoutMs);
+
+    function listener(message) {
+      if (!message || message.type !== type) return;
+      clearTimeout(timer);
+      chrome.runtime.onMessage.removeListener(listener);
+      resolve();
+    }
+
+    chrome.runtime.onMessage.addListener(listener);
+  });
+}
+
+async function engineIsAlive() {
+  const pong = waitForBroadcast("engine:pong", 3000).then(
+    () => true,
+    () => false
+  );
+  await chrome.runtime.sendMessage({ type: "engine:ping" }).catch(() => {});
+  return pong;
+}
+
+// 确保那个隐藏的处理页存在（已经开着且活着就复用）
+async function ensureEngine() {
+  const url = chrome.runtime.getURL(ENGINE_URL);
+  const existing = await chrome.tabs.query({ url });
+
+  if (existing.length) {
+    if (await engineIsAlive()) return;
+    // 页面还在但已经不应答，关掉重开
+    await chrome.tabs.remove(existing.map((t) => t.id)).catch(() => {});
+  }
+
+  const ready = waitForBroadcast("engine:ready", 15000);
+  await chrome.windows.create({
+    url,
+    focused: false,
+    width: 480,
+    height: 320,
+  });
+  await ready;
+}

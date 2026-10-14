@@ -9,7 +9,7 @@
           sans-serif;
         font-size: 13px;
         margin: 10px;
-        min-width: 260px;
+        min-width: 300px;
         text-align: center;
       }
 
@@ -17,16 +17,42 @@
         padding: 6px 10px;
         margin: 4px 0;
         font-size: 13px;
-        min-width: 220px;
+        min-width: 260px;
+      }
+
+      .group {
+        margin-bottom: 10px;
+      }
+
+      .hint {
+        color: #777;
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      #siteList {
+        width: 260px;
+        height: 44px;
+        margin: 4px 0;
+        font-size: 12px;
+        resize: vertical;
+      }
+
+      #scope {
+        width: 260px;
+        margin: 6px auto 2px;
+        text-align: left;
+        font-size: 12px;
       }
 
       #status {
         margin-top: 8px;
         min-height: 16px;
         color: #333;
+        text-align: left;
       }
 
-      #fileInput {
+      input[type="file"] {
         display: none;
       }
     </style>
@@ -34,17 +60,44 @@
   <body>
     <h3>Cookie Transfer</h3>
 
-    <div>
-      <button id="exportBtn">导出Cookies</button>
+    <div class="group">
+      <div>
+        <button id="exportBtn">导出Cookies</button>
+      </div>
+
+      <div>
+        <button id="importBtn">导入Cookies</button>
+        <input type="file" id="fileInput" accept="application/json" />
+      </div>
     </div>
 
-    <div>
-      <button id="importBtn">导入Cookies</button>
-      <input type="file" id="fileInput" accept="application/json" />
+    <div class="group">
+      <div>
+        <button id="exportDataBtn">导出网站数据</button>
+      </div>
+
+      <div>
+        <button id="importDataBtn">导入网站数据</button>
+        <input type="file" id="dataFileInput" accept="application/json" />
+      </div>
+
+      <label id="scope">
+        <input type="checkbox" id="useBrowserList" />
+        自动收集浏览器里的网站（正在打开的、有 Cookie 的、历史访问过的）
+      </label>
+      <textarea
+        id="siteList"
+        placeholder="要迁移的网址，一行一个。留空就只用上面自动收集的。"
+      ></textarea>
+
+      <div class="hint">
+        网站数据 = 每个网站的本地存储 + 它的数据库（IndexedDB，含文件）。<br />
+        不用联网，断网也能用；干活时会另外开一个小窗口在后台跑，完事自己关掉，别手动去关它。
+      </div>
     </div>
 
     <div id="status"></div>
 
     <script src="popup.js"></script>
   </body>
-  </html>
+</html>

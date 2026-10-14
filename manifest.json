@@ -1,12 +1,16 @@
 {
   "manifest_version": 3,
   "name": "Cookie Transfer",
-  "description": "Export and import all cookies in one shot.",
-  "version": "1.0.0",
+  "description": "Export and import all cookies, plus each site's local storage and IndexedDB, in one shot.",
+  "version": "2.0.0",
   "permissions": [
     "cookies",
     "downloads",
-    "storage"
+    "storage",
+    "tabs",
+    "history",
+    "debugger",
+    "offscreen"
   ],
   "host_permissions": [
     "<all_urls>"
@@ -20,4 +24,3 @@
     "default_title": "Cookie Transfer"
   }
 }
-
