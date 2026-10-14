@@ -6,7 +6,7 @@ const FAKE_HTML =
   '<!doctype html><html><head><meta charset="utf-8"><title>Cookie Transfer</title></head><body></body></html>';
 const FEED_SIZE = 1024 * 1024;
 const WORKER_MIN = 1;
-const WORKER_MAX = 12;
+const WORKER_MAX = 100;
 const WORKER_DEFAULT = 3;
 const NAV_TIMEOUT = 20000;
 const DUMP_TIMEOUT = 300000;
@@ -518,18 +518,24 @@ async function pageRestore() {
 
 // ---------- 工作标签池 ----------
 
+// 后台页面按需开：设成 100 但只有 3 个网站时，就只开 3 个
 class Pool {
-  constructor() {
+  constructor(limit) {
+    this.limit = limit;
+    this.created = 0;
     this.free = [];
     this.waiters = [];
-  }
-
-  get count() {
-    return this.free.length + this.waiters.length;
+    this.all = [];
   }
 
   async acquire() {
     if (this.free.length) return this.free.pop();
+    if (this.created < this.limit) {
+      this.created++;
+      const w = await WorkerTab.create(engineWindowId);
+      this.all.push(w);
+      return w;
+    }
     return new Promise((res) => this.waiters.push(res));
   }
 
@@ -538,35 +544,27 @@ class Pool {
     if (next) next(w);
     else this.free.push(w);
   }
+
+  async close() {
+    for (const w of this.all) await w.stop();
+    this.all = [];
+    this.free = [];
+    this.created = 0;
+  }
 }
 
 // 并发数由用户在界面上调，导出和导入都从这里取
-async function poolSize() {
+async function makePool() {
   const { concurrency } = await chrome.storage.local.get("concurrency");
   const n = Math.floor(Number(concurrency));
-  if (!Number.isFinite(n)) return WORKER_DEFAULT;
-  return Math.min(WORKER_MAX, Math.max(WORKER_MIN, n));
+  const wanted = Number.isFinite(n) ? Math.min(WORKER_MAX, Math.max(WORKER_MIN, n)) : WORKER_DEFAULT;
+  return new Pool(wanted);
 }
 
-// 开几个后台标签；第一个都开不起来就直接报错，开起来几个就用几个
-async function makePool() {
-  const wanted = await poolSize();
-  const pool = new Pool();
-  for (let i = 0; i < wanted; i++) {
-    try {
-      pool.free.push(await WorkerTab.create(engineWindowId));
-    } catch (e) {
-      if (!pool.free.length) throw e;
-      break;
-    }
-  }
-  return pool;
-}
-
-async function drain(pool, jobs) {
-  const runners = [];
-  for (let i = 0; i < Math.max(1, pool.count); i++) runners.push(jobs(pool));
-  await Promise.all(runners);
+async function drain(pool, jobs, runners) {
+  const list = [];
+  for (let i = 0; i < runners; i++) list.push(jobs(pool));
+  await Promise.all(list);
 }
 
 // 失败条数只留前若干条详情，几万条全失败时不该把备份文件撑爆
@@ -650,9 +648,9 @@ async function runExport(payload) {
   };
 
   try {
-    await drain(pool, jobs);
+    await drain(pool, jobs, Math.min(pool.limit, origins.length));
   } finally {
-    for (const w of pool.free) await w.stop();
+    await pool.close();
   }
 
   // 一个网站一行，导入时才能一行一行读，不必把整个文件一次吞进内存
@@ -781,7 +779,7 @@ async function runImport() {
       incoming.chunks[i] = null; // 这块用完了，让内存能回收
       reader.push(decoder.decode(chunk, { stream: true }));
       // 排队的网站太多就先等等，别让内存一路涨
-      while (!badFormat && inflight.size > pool.count * 2) await Promise.race(inflight);
+      while (!badFormat && pool.created && inflight.size - pool.created > pool.created * 2) await Promise.race(inflight);
       if (badFormat) break;
     }
     reader.push(decoder.decode());
@@ -793,7 +791,7 @@ async function runImport() {
     }
   } finally {
     incoming = { chunks: [] };
-    for (const w of pool.free) await w.stop();
+    await pool.close();
   }
 
   if (badFormat) {
