@@ -7,7 +7,9 @@ const FAKE_HTML =
 const FEED_SIZE = 1024 * 1024;
 const WORKER_COUNT = 3;
 const NAV_TIMEOUT = 20000;
-const FORMAT = "cookie-transfer-sitedata-v1";
+const DUMP_TIMEOUT = 300000;
+const FAILURE_LIMIT = 200;
+const FORMAT = "cookie-transfer-sitedata-v2";
 
 // 只能对普通网站动手脚，浏览器自己的页面、扩展页面都排除
 const SKIP_HOSTS = new Set(["chromewebstore.google.com", "addons.microsoft.com"]);
@@ -507,6 +509,66 @@ async function pageRestore() {
   return result;
 }
 
+// ---------- 工作标签池 ----------
+
+class Pool {
+  constructor() {
+    this.free = [];
+    this.waiters = [];
+  }
+
+  get count() {
+    return this.free.length + this.waiters.length;
+  }
+
+  async acquire() {
+    if (this.free.length) return this.free.pop();
+    return new Promise((res) => this.waiters.push(res));
+  }
+
+  release(w) {
+    const next = this.waiters.shift();
+    if (next) next(w);
+    else this.free.push(w);
+  }
+}
+
+// 开几个后台标签；第一个都开不起来就直接报错，开起来几个就用几个
+async function makePool() {
+  const pool = new Pool();
+  for (let i = 0; i < WORKER_COUNT; i++) {
+    try {
+      pool.free.push(await WorkerTab.create(engineWindowId));
+    } catch (e) {
+      if (!pool.free.length) throw e;
+      break;
+    }
+  }
+  return pool;
+}
+
+async function drain(pool, jobs) {
+  const runners = [];
+  for (let i = 0; i < Math.max(1, pool.count); i++) runners.push(jobs(pool));
+  await Promise.all(runners);
+}
+
+// 失败条数只留前若干条详情，几万条全失败时不该把备份文件撑爆
+function makeFailureRecorder(limit) {
+  const list = [];
+  let count = 0;
+  return {
+    list,
+    get count() {
+      return count;
+    },
+    add(text) {
+      count++;
+      if (list.length < limit) list.push(text);
+    },
+  };
+}
+
 // ---------- 导出 ----------
 
 async function runExport(payload) {
@@ -517,27 +579,20 @@ async function runExport(payload) {
   }
 
   const captured = new Set();
-  const parts = [`{"format":${JSON.stringify(FORMAT)},"exportedAt":${JSON.stringify(new Date().toISOString())},"originCount":${origins.length},"origins":[`];
-  const failures = [];
+  const bodies = []; // 每个有数据的网站一段文字，最后一次性拼成文件
+  const failure = makeFailureRecorder(FAILURE_LIMIT);
   const stats = { sites: 0, localStorageKeys: 0, databases: 0, records: 0, blobBytes: 0, bytes: 0 };
-  let first = true;
+  let scanned = 0;
   let done = 0;
   const total = origins.length;
   const report = (current) => post({ type: "siteData:progress", phase: "export", done, total, current });
 
-  const workers = [];
-  try {
-    for (let i = 0; i < WORKER_COUNT; i++) {
-      try {
-        workers.push(await WorkerTab.create(engineWindowId));
-      } catch (e) {
-        if (!workers.length) throw e;
-        break;
-      }
-    }
+  const pool = await makePool();
+  let cursor = 0;
 
-    let cursor = 0;
-    const pump = async (w) => {
+  const jobs = async (pool) => {
+    const w = await pool.acquire();
+    try {
       while (cursor < origins.length) {
         const origin = origins[cursor++];
         if (captured.has(origin)) {
@@ -550,17 +605,23 @@ async function runExport(payload) {
           const actual = await w.evaluate("location.origin");
           if (captured.has(actual)) continue;
           captured.add(actual);
+          scanned++;
 
-          const meta = await w.evaluate(`(${pageDump.toString()})()`, { awaitPromise: true, timeout: 300000 });
+          const meta = await w.evaluate(`(${pageDump.toString()})()`, { awaitPromise: true, timeout: DUMP_TIMEOUT });
+          for (const n of meta.notes || []) failure.add(actual + "：" + n);
+
+          if (meta.localStorage + meta.databases === 0) {
+            // 这个网站什么都没存，连内容都不用从页面里取
+            await w.evaluate("delete window.__CT_PARTS");
+            continue;
+          }
+
           const count = await w.evaluate("window.__CT_PARTS ? window.__CT_PARTS.length : 0");
-          // 先整份收齐再一次性拼上去，否则几个网站同时写会互相穿插
+          // 先整段收齐再交出去，否则几个网站同时写会互相穿插
           const pieces = [];
           for (let i = 0; i < count; i++) pieces.push(await w.evaluate(`window.__CT_PARTS[${i}]`));
           await w.evaluate("delete window.__CT_PARTS");
-
-          if (!first) parts.push(",");
-          first = false;
-          for (const p of pieces) parts.push(p);
+          bodies.push(pieces);
 
           stats.sites += 1;
           stats.localStorageKeys += meta.localStorage;
@@ -568,102 +629,167 @@ async function runExport(payload) {
           stats.records += meta.records;
           stats.blobBytes += meta.blobBytes;
           stats.bytes += meta.bytes;
-          for (const n of meta.notes || []) failures.push(actual + "：" + n);
         } catch (e) {
-          failures.push(origin + "：" + (e.message || String(e)));
+          failure.add(origin + "：" + (e.message || String(e)));
         } finally {
           done++;
         }
       }
-    };
+    } finally {
+      pool.release(w);
+    }
+  };
 
-    await Promise.all(workers.map(pump));
+  try {
+    await drain(pool, jobs);
   } finally {
-    for (const w of workers) await w.stop();
+    for (const w of pool.free) await w.stop();
   }
 
-  parts.push(`],"failures":${JSON.stringify(failures)},"stats":${JSON.stringify(stats)}}`);
+  // 一个网站一行，导入时才能一行一行读，不必把整个文件一次吞进内存
+  const header = `{"format":${JSON.stringify(FORMAT)},"exportedAt":${JSON.stringify(new Date().toISOString())},` +
+    `"scanned":${scanned},"siteCount":${bodies.length},"failures":${JSON.stringify(failure.list)},` +
+    `"failureCount":${failure.count},"stats":${JSON.stringify(stats)},"origins":[`;
+
+  const parts = [header + "\n"];
+  for (let i = 0; i < bodies.length; i++) {
+    if (i) parts.push(",\n");
+    for (const p of bodies[i]) parts.push(p);
+  }
+  parts.push("\n]}");
 
   const blob = new Blob(parts, { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const filename = `site-data-export-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
 
-  post({ type: "siteData:done", ok: true, phase: "export", ...stats, failedCount: failures.length, filename });
+  post({ type: "siteData:done", ok: true, phase: "export", scanned, ...stats, failureCount: failure.count, filename });
 
   await downloadAndRelease(url, filename);
 }
 
 // ---------- 导入 ----------
 
-async function runImport() {
-  const bytes = new Uint8Array(incoming.chunks.reduce((n, c) => n + c.length, 0));
-  let off = 0;
-  for (const c of incoming.chunks) {
-    bytes.set(c, off);
-    off += c.length;
-  }
-  incoming = { chunks: [] };
-
-  let payload;
-  try {
-    payload = JSON.parse(new TextDecoder().decode(bytes));
-  } catch (e) {
-    return post({ type: "siteData:done", ok: false, error: "文件读不懂，可能不是本插件导出的：" + e.message });
-  }
-  if (!payload || payload.format !== FORMAT || !Array.isArray(payload.origins)) {
-    return post({ type: "siteData:done", ok: false, error: "文件格式不对，这不是网站数据导出文件（导 Cookie 的文件不能用来导网站数据）" });
-  }
-
-  const entries = payload.origins.filter((e) => e && typeof e.origin === "string" && /^https?:/.test(e.origin));
-  const failures = [];
-  const stats = { sites: 0, localStorageKeys: 0, databases: 0, records: 0 };
-  let done = 0;
-  const total = entries.length;
-  const report = (current) => post({ type: "siteData:progress", phase: "import", done, total, current });
-
-  const workers = [];
-  try {
-    for (let i = 0; i < WORKER_COUNT; i++) {
-      try {
-        workers.push(await WorkerTab.create(engineWindowId));
-      } catch (e) {
-        if (!workers.length) throw e;
-        break;
+// 逐行读备份：头一行拿总数，之后每行一个网站，读一个处理一个，读完就把用过的字节丢掉
+function makeLineReader(onLine) {
+  let rest = "";
+  return {
+    push(text) {
+      rest += text;
+      let nl;
+      while ((nl = rest.indexOf("\n")) >= 0) {
+        const line = rest.slice(0, nl);
+        rest = rest.slice(nl + 1);
+        onLine(line);
       }
+    },
+    // 最后一行可能没有换行符收尾
+    end() {
+      if (rest) {
+        onLine(rest);
+        rest = "";
+      }
+    },
+  };
+}
+
+async function runImport() {
+  const pool = await makePool();
+  const failure = makeFailureRecorder(FAILURE_LIMIT);
+  const stats = { sites: 0, localStorageKeys: 0, databases: 0, records: 0 };
+  let total = 0;
+  let done = 0;
+  let badFormat = null;
+  let inOrigins = false;
+
+  const inflight = new Set();
+
+  const importOne = async (line) => {
+    const w = await pool.acquire();
+    try {
+      const entry = JSON.parse(line.replace(/,$/, ""));
+      if (!entry || typeof entry.origin !== "string" || !/^https?:/.test(entry.origin)) {
+        failure.add("备份里有一条记录的网站地址不对，跳过了：" + String(entry && entry.origin).slice(0, 80));
+        return;
+      }
+      post({ type: "siteData:progress", phase: "import", done, total, current: entry.origin });
+
+      await w.goto(entry.origin);
+      const text = JSON.stringify(entry);
+      await w.evaluate("window.__CT_ACC = ''");
+      for (let i = 0; i < text.length; i += FEED_SIZE) {
+        await w.evaluate("__CT_ACC += " + JSON.stringify(text.slice(i, i + FEED_SIZE)));
+      }
+      const r = await w.evaluate(`(${pageRestore.toString()})()`, { awaitPromise: true });
+      stats.sites += 1;
+      stats.localStorageKeys += r.localStorage;
+      stats.databases += r.databases;
+      stats.records += r.records;
+      for (const n of r.notes || []) failure.add(entry.origin + "：" + n);
+    } catch (e) {
+      failure.add(line.slice(0, 60) + "……：" + (e.message || String(e)));
+    } finally {
+      done++;
+      pool.release(w);
+    }
+  };
+
+  const reader = makeLineReader((line) => {
+    const s = line.trim();
+    if (!s || badFormat) return;
+
+    if (!inOrigins) {
+      const f = /"format":"([^"]+)"/.exec(s);
+      if (f && f[1] !== FORMAT) {
+        badFormat = s.includes('"origins"')
+          ? "这是旧版插件导出的文件，新版对不上，请用旧版导的文件配旧版插件，或重新导一份"
+          : "这不像网站数据备份的头一行，可能选错了文件（导 Cookie 的文件不能用来导网站数据）";
+        return;
+      }
+      const c = /"siteCount":(\d+)/.exec(s);
+      if (c) total = Number(c[1]);
+      if (s.includes('"origins":[')) inOrigins = true;
+      return;
     }
 
-    let cursor = 0;
-    const pump = async (w) => {
-      while (cursor < entries.length) {
-        const entry = entries[cursor++];
-        report(entry.origin);
-        try {
-          await w.goto(entry.origin);
-          const text = JSON.stringify(entry);
-          await w.evaluate("window.__CT_ACC = ''");
-          for (let i = 0; i < text.length; i += FEED_SIZE) {
-            await w.evaluate("__CT_ACC += " + JSON.stringify(text.slice(i, i + FEED_SIZE)));
-          }
-          const r = await w.evaluate(`(${pageRestore.toString()})()`, { awaitPromise: true });
-          stats.sites += 1;
-          stats.localStorageKeys += r.localStorage;
-          stats.databases += r.databases;
-          stats.records += r.records;
-          for (const n of r.notes || []) failures.push(entry.origin + "：" + n);
-        } catch (e) {
-          failures.push(entry.origin + "：" + (e.message || String(e)));
-        } finally {
-          done++;
-        }
-      }
-    };
+    if (s[0] === "]") return; // 收尾那行
 
-    await Promise.all(workers.map(pump));
+    const task = (async () => {
+      try {
+        await importOne(s);
+      } finally {
+        inflight.delete(task);
+      }
+    })();
+    inflight.add(task);
+  });
+
+  const decoder = new TextDecoder();
+  try {
+    for (let i = 0; i < incoming.chunks.length; i++) {
+      const chunk = incoming.chunks[i];
+      incoming.chunks[i] = null; // 这块用完了，让内存能回收
+      reader.push(decoder.decode(chunk, { stream: true }));
+      // 排队的网站太多就先等等，别让内存一路涨
+      while (!badFormat && inflight.size > pool.count * 2) await Promise.race(inflight);
+      if (badFormat) break;
+    }
+    reader.push(decoder.decode());
+    reader.end();
+    if (!inOrigins && !badFormat) badFormat = "文件里没有网站数据那一段，可能选错了文件";
+
+    if (!badFormat) {
+      while (inflight.size) await Promise.race(inflight);
+    }
   } finally {
-    for (const w of workers) await w.stop();
+    incoming = { chunks: [] };
+    for (const w of pool.free) await w.stop();
   }
 
-  post({ type: "siteData:done", ok: true, phase: "import", ...stats, failedCount: failures.length, failures: failures.slice(0, 40) });
+  if (badFormat) {
+    post({ type: "siteData:done", ok: false, error: badFormat });
+    return;
+  }
+  post({ type: "siteData:done", ok: true, phase: "import", ...stats, failureCount: failure.count, failures: failure.list.slice(0, 10) });
 }
 
 function downloadAndRelease(url, filename) {

@@ -8,10 +8,12 @@ function setStatus(text, isError) {
 
 function describeExport(res) {
   return [
-    `导出完成：${res.sites} 个网站有数据。`,
+    `导出完成：扫了 ${res.scanned} 个网站，其中 ${res.sites} 个真的存了东西（没存东西的不写进文件）。`,
     `本地存储 ${res.localStorageKeys} 条，数据库 ${res.databases} 个（${res.records} 条记录）。`,
     res.blobBytes ? `其中文件类数据约 ${(res.blobBytes / 1048576).toFixed(1)} MB。` : "",
-    res.failedCount ? `有 ${res.failedCount} 项没能处理，详情已记在备份文件里。` : "",
+    res.failureCount
+      ? `有 ${res.failureCount} 项没能处理${res.failureCount > 200 ? "（文件里只留前 200 项详情）" : ""}。`
+      : "",
     `文件名叫 ${res.filename}，正在等你选保存位置。`
   ]
     .filter(Boolean)
@@ -22,7 +24,7 @@ function describeImport(res) {
   return [
     `导入完成：写回了 ${res.sites} 个网站。`,
     `本地存储 ${res.localStorageKeys} 条，数据库 ${res.databases} 个（${res.records} 条记录）。`,
-    res.failedCount ? `有 ${res.failedCount} 项没成功。` : ""
+    res.failureCount ? `有 ${res.failureCount} 项没成功。` : ""
   ]
     .filter(Boolean)
     .join(" ");
@@ -108,8 +110,11 @@ chrome.storage.local.get(["useBrowserList", "siteList"], (saved) => {
 
 for (const [key, el] of Object.entries(scopeInputs)) {
   el.addEventListener("change", () => {
-    chrome.storage.local.set({
-      [key]: key === "siteList" ? el.value : el.checked,
+    chrome.storage.local.set({ [key]: key === "siteList" ? el.value : el.checked }, () => {
+      // 清单可能长达几 MB，装不下时必须说清楚，不能默默丢掉
+      if (chrome.runtime.lastError) {
+        setStatus("这份清单太长，扩展自己的存储装不下（上限约 10MB），所以没帮你记住；这次导出还是按框里的内容跑。", true);
+      }
     });
   });
 }
