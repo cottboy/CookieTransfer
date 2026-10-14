@@ -144,7 +144,8 @@ chrome.runtime.onMessage.addListener((msg) => {
 
   if (msg.type === "siteData:progress") {
     const action = msg.phase === "import" ? "导入" : "导出";
-    setStatus(`正在${action}网站数据 ${msg.done}/${msg.total}：${msg.current}`, false);
+    const busy = (msg.busy || []).join("、");
+    setStatus(`正在${action}网站数据 ${msg.done}/${msg.total}${busy ? "｜正在处理：" + busy : ""}`, false);
   } else if (msg.type === "siteData:done") {
     if (!msg.ok) {
       setStatus("失败：" + msg.error, true);

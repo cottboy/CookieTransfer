@@ -6,8 +6,9 @@ const FAKE_HTML =
   '<!doctype html><html><head><meta charset="utf-8"><title>Cookie Transfer</title></head><body></body></html>';
 const FEED_SIZE = 1024 * 1024;
 const WORKER_MIN = 1;
-const WORKER_MAX = 100;
+const WORKER_MAX = 20;
 const WORKER_DEFAULT = 3;
+const CALL_TIMEOUT = 60000;
 const NAV_TIMEOUT = 20000;
 const DUMP_TIMEOUT = 300000;
 const FAILURE_LIMIT = 200;
@@ -70,7 +71,11 @@ class WorkerTab {
     const committed = new Promise((resolve, reject) => {
       this.onReady = resolve;
       this.onFail = reject;
-      setTimeout(() => reject(new Error("打开网站外壳超时")), NAV_TIMEOUT);
+      setTimeout(() => {
+        const e = new Error("打开网站外壳超时");
+        e.stalled = true;
+        reject(e);
+      }, NAV_TIMEOUT);
     });
     const nav = await this.cmd("Page.navigate", { url: origin + "/" });
     if (nav && nav.errorText) {
@@ -81,7 +86,7 @@ class WorkerTab {
     return this.origin;
   }
 
-  async evaluate(expression, { awaitPromise = false, timeout = 0 } = {}) {
+  async evaluate(expression, { awaitPromise = false, timeout = CALL_TIMEOUT } = {}) {
     const run = this.cmd("Runtime.evaluate", {
       expression,
       awaitPromise,
@@ -96,10 +101,16 @@ class WorkerTab {
       }
       return res.result.value;
     });
-    if (!timeout) return run;
+    // 每个网站都必须有截止时间：页面一旦被浏览器丢弃或卡死，没有超时就整批永远等不完
     return Promise.race([
       run,
-      new Promise((_r, rej) => setTimeout(() => rej(new Error("页面内执行超时")), timeout)),
+      new Promise((_r, rej) =>
+        setTimeout(() => {
+          const e = new Error("这个网站的页面没响应");
+          e.stalled = true;
+          rej(e);
+        }, timeout)
+      ),
     ]);
   }
 
@@ -540,9 +551,22 @@ class Pool {
   }
 
   release(w) {
+    // 卡过的页面不再复用：它下一个网站多半也会卡，留着只会拖住最后那几个
+    if (w.broken) {
+      this.retire(w);
+      return;
+    }
     const next = this.waiters.shift();
     if (next) next(w);
     else this.free.push(w);
+  }
+
+  retire(w) {
+    w.stop();
+    this.all.splice(this.all.indexOf(w), 1);
+    this.created--;
+    const next = this.waiters.shift();
+    if (next) this.acquire().then(next, () => {});
   }
 
   async close() {
@@ -599,51 +623,60 @@ async function runExport(payload) {
   let scanned = 0;
   let done = 0;
   const total = origins.length;
-  const report = (current) => post({ type: "siteData:progress", phase: "export", done, total, current });
 
   const pool = await makePool();
   let cursor = 0;
+  // 报进度时顺带报"正在处理哪几个"，否则并行到最后会看着像卡住
+  const report = () =>
+    post({
+      type: "siteData:progress",
+      phase: "export",
+      done,
+      total,
+      busy: pool.all.filter((w) => w.busy).map((w) => w.busy).slice(0, 3),
+    });
 
   const jobs = async (pool) => {
-    const w = await pool.acquire();
-    try {
-      while (cursor < origins.length) {
-        const origin = origins[cursor++];
-        if (captured.has(origin)) {
-          done++;
-          continue;
-        }
-        report(origin);
-        try {
-          const actual = await w.goto(origin);
-          if (captured.has(actual)) continue;
-          captured.add(actual);
-          scanned++;
-
-          const meta = await w.evaluate(`(${pageDump.toString()})()`, { awaitPromise: true, timeout: DUMP_TIMEOUT });
-          for (const n of meta.notes || []) failure.add(actual + "：" + n);
-
-          if (meta.localStorage + meta.databases === 0) continue;
-
-          // 先整段收齐再交出去，否则几个网站同时写会互相穿插
-          const pieces = [];
-          for (let i = 0; i < meta.partCount; i++) pieces.push(await w.evaluate(`window.__CT_PARTS[${i}]`));
-          bodies.push(pieces);
-
-          stats.sites += 1;
-          stats.localStorageKeys += meta.localStorage;
-          stats.databases += meta.databases;
-          stats.records += meta.records;
-          stats.blobBytes += meta.blobBytes;
-          stats.bytes += meta.bytes;
-        } catch (e) {
-          failure.add(origin + "：" + (e.message || String(e)));
-        } finally {
-          done++;
-        }
+    while (cursor < origins.length) {
+      const origin = origins[cursor++];
+      if (captured.has(origin)) {
+        done++;
+        continue;
       }
-    } finally {
-      pool.release(w);
+      const w = await pool.acquire();
+      w.busy = origin;
+      report();
+      try {
+        const actual = await w.goto(origin);
+        w.busy = actual;
+        if (captured.has(actual)) continue;
+        captured.add(actual);
+        scanned++;
+
+        const meta = await w.evaluate(`(${pageDump.toString()})()`, { awaitPromise: true, timeout: DUMP_TIMEOUT });
+        for (const n of meta.notes || []) failure.add(actual + "：" + n);
+
+        if (meta.localStorage + meta.databases === 0) continue;
+
+        // 先整段收齐再交出去，否则几个网站同时写会互相穿插
+        const pieces = [];
+        for (let i = 0; i < meta.partCount; i++) pieces.push(await w.evaluate(`window.__CT_PARTS[${i}]`));
+        bodies.push(pieces);
+
+        stats.sites += 1;
+        stats.localStorageKeys += meta.localStorage;
+        stats.databases += meta.databases;
+        stats.records += meta.records;
+        stats.blobBytes += meta.blobBytes;
+        stats.bytes += meta.bytes;
+      } catch (e) {
+        if (e.stalled) w.broken = true;
+        failure.add(origin + "：" + (e.message || String(e)));
+      } finally {
+        w.busy = null;
+        done++;
+        pool.release(w);
+      }
     }
   };
 
@@ -710,6 +743,15 @@ async function runImport() {
 
   const inflight = new Set();
 
+  const report = () =>
+    post({
+      type: "siteData:progress",
+      phase: "import",
+      done,
+      total,
+      busy: pool.all.filter((w) => w.busy).map((w) => w.busy).slice(0, 3),
+    });
+
   const importOne = async (line) => {
     const w = await pool.acquire();
     try {
@@ -718,7 +760,8 @@ async function runImport() {
         failure.add("备份里有一条记录的网站地址不对，跳过了：" + String(entry && entry.origin).slice(0, 80));
         return;
       }
-      post({ type: "siteData:progress", phase: "import", done, total, current: entry.origin });
+      w.busy = entry.origin;
+      report();
 
       await w.goto(entry.origin);
       const text = JSON.stringify(entry);
@@ -728,15 +771,17 @@ async function runImport() {
           (n ? "__CT_ACC += " : "window.__CT_ACC = ") + JSON.stringify(text.slice(i, i + FEED_SIZE))
         );
       }
-      const r = await w.evaluate(`(${pageRestore.toString()})()`, { awaitPromise: true });
+      const r = await w.evaluate(`(${pageRestore.toString()})()`, { awaitPromise: true, timeout: DUMP_TIMEOUT });
       stats.sites += 1;
       stats.localStorageKeys += r.localStorage;
       stats.databases += r.databases;
       stats.records += r.records;
       for (const n of r.notes || []) failure.add(entry.origin + "：" + n);
     } catch (e) {
+      if (e.stalled) w.broken = true;
       failure.add(line.slice(0, 60) + "……：" + (e.message || String(e)));
     } finally {
+      w.busy = null;
       done++;
       pool.release(w);
     }
