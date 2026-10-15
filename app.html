@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>Cookie Transfer</title>
+    <style>
+      body {
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 13px;
+        margin: 10px;
+        text-align: center;
+      }
+
+      button {
+        padding: 6px 10px;
+        margin: 4px 0;
+        font-size: 13px;
+        min-width: 260px;
+        cursor: pointer;
+      }
+
+      .group {
+        margin-bottom: 12px;
+      }
+
+      .hint {
+        color: #777;
+        font-size: 11px;
+        line-height: 1.6;
+      }
+
+      #scope,
+      #conc {
+        display: block;
+        width: 260px;
+        margin: 6px auto 2px;
+        text-align: left;
+        font-size: 12px;
+      }
+
+      #siteList {
+        width: 260px;
+        height: 44px;
+        margin: 4px 0;
+        font-size: 12px;
+        resize: vertical;
+      }
+
+      #concurrency {
+        width: 52px;
+        margin-left: 6px;
+        font-size: 12px;
+      }
+
+      #status {
+        margin-top: 8px;
+        min-height: 16px;
+        color: #333;
+        text-align: left;
+        line-height: 1.6;
+      }
+
+      #live {
+        cursor: pointer;
+        background: #eef;
+        border: 1px solid #ccd;
+        padding: 6px;
+        margin-bottom: 10px;
+        font-size: 12px;
+      }
+
+      #progress {
+        margin: 10px 0 4px;
+      }
+
+      #barTrack {
+        height: 10px;
+        background: #eee;
+        border: 1px solid #ddd;
+      }
+
+      #bar {
+        height: 100%;
+        width: 0;
+        background: #2b7de0;
+        transition: width 0.2s;
+      }
+
+      #barText {
+        font-size: 12px;
+        color: #444;
+        margin-top: 4px;
+      }
+
+      #logBox {
+        height: 150px;
+        overflow: auto;
+        border: 1px solid #eee;
+        margin-top: 10px;
+        padding: 4px 8px;
+        font-size: 11px;
+        color: #666;
+      }
+
+      #log {
+        margin: 0;
+        padding-left: 18px;
+      }
+
+      /* 独立窗口形态：宽版、左对齐、控件铺开 */
+      body[data-mode="window"] {
+        margin: 14px 18px;
+        text-align: left;
+      }
+
+      body[data-mode="window"] h3 {
+        text-align: center;
+      }
+
+      body[data-mode="window"] button {
+        min-width: 0;
+      }
+
+      body[data-mode="window"] .row {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      body[data-mode="window"] #scope,
+      body[data-mode="window"] #conc,
+      body[data-mode="window"] #siteList {
+        width: 100%;
+        box-sizing: border-box;
+      }
+
+      body[data-mode="window"] #siteList {
+        height: 140px;
+      }
+
+      /* 两种形态各自看不见的部分；元素都留在页面里，只是不显示 */
+      body[data-mode="popup"] .win,
+      body[data-mode="window"] .pop {
+        display: none !important;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Cookie Transfer</h3>
+
+    <div id="live" class="pop" hidden>
+      <span id="liveText"></span>
+      <div class="hint">点这里回到那个独立窗口</div>
+    </div>
+
+    <div class="group pop">
+      <button id="detach">打开独立窗口</button>
+      <div class="hint">
+        挑保存位置、搬迁网站数据都得在独立窗口里点：小弹窗一眨就没了，重活干到一半没人看着就会卡住。<br />
+        独立窗口是单独一个窗口，点别处不会缩回去，也不会被浏览器偷偷收掉。
+      </div>
+    </div>
+
+    <div class="win group">
+      <div class="row">
+        <button id="exportBtn">导出Cookies</button>
+        <button id="importBtn">导入Cookies</button>
+      </div>
+      <div class="row">
+        <button id="exportDataBtn">导出网站数据</button>
+        <button id="importDataBtn">导入网站数据</button>
+      </div>
+
+      <label id="scope">
+        <input type="checkbox" id="useBrowserList" />
+        自动收集浏览器里的网站（正在打开的、有 Cookie 的、历史访问过的）
+      </label>
+      <textarea id="siteList" placeholder="要迁移的网址，一行一个。留空就只用上面自动收集的。"></textarea>
+
+      <label id="conc">
+        同时干活的数量
+        <input type="number" id="concurrency" min="1" max="20" step="1" value="3" />
+      </label>
+
+      <div class="hint">
+        网站数据 = 每个网站的本地存储 + 它的数据库（IndexedDB，含文件）。<br />
+        不用联网，断网也能用。导出时先挑一个文件，之后每处理完一个网站就当场写进去，几百兆也不会把内存撑爆。<br />
+        同时干活的数量：后台同时开几个空壳页面一起搬，最多 20；网站少时会自动少开。调高不一定更快，还很吃内存。<br />
+        干活时会在一个最小化窗口里开这些空壳页面，完事自己关掉，别手动去关它们。
+      </div>
+
+      <button id="cancel" hidden>中止</button>
+      <div id="progress" hidden>
+        <div id="barTrack"><div id="bar"></div></div>
+        <div id="barText"></div>
+      </div>
+    </div>
+
+    <div id="status"></div>
+
+    <div id="logBox" class="win">
+      <ul id="log"></ul>
+    </div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
