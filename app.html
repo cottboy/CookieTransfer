@@ -38,6 +38,23 @@
         font-size: 12px;
       }
 
+      #kinds {
+        width: 260px;
+        margin: 6px auto;
+        text-align: left;
+        font-size: 12px;
+      }
+
+      .kind {
+        display: block;
+        margin: 2px 0;
+      }
+
+      .kind input {
+        margin-right: 5px;
+        vertical-align: -1px;
+      }
+
       #siteList {
         width: 260px;
         height: 44px;
@@ -129,6 +146,7 @@
 
       body[data-mode="window"] #scope,
       body[data-mode="window"] #conc,
+      body[data-mode="window"] #kinds,
       body[data-mode="window"] #siteList {
         width: 100%;
         box-sizing: border-box;
@@ -171,6 +189,19 @@
         <button id="importDataBtn">导入网站数据</button>
       </div>
 
+      <div id="kinds">
+        <div class="hint">上面两个按钮只搬这里勾的：</div>
+        <label class="kind">
+          <input type="checkbox" id="wantLocalStorage" checked />
+          LocalStorage（本地存储：网页自己记的小纸条）
+        </label>
+        <label class="kind">
+          <input type="checkbox" id="wantIndexedDB" checked />
+          IndexedDB（网站数据库：里面存的记录、文件都算）
+        </label>
+        <div class="hint">两个都不勾，点导出或导入不会开工。</div>
+      </div>
+
       <label id="scope">
         <input type="checkbox" id="useBrowserList" />
         自动收集浏览器里的网站（正在打开的、有 Cookie 的、历史访问过的）
@@ -183,7 +214,7 @@
       </label>
 
       <div class="hint">
-        网站数据 = 每个网站的本地存储 + 它的数据库（IndexedDB，含文件）。<br />
+        网站数据 = 每个网站的本地存储 + 它的数据库（IndexedDB，含文件），上面勾了哪样就只搬哪样。<br />
         不用联网，断网也能用。导出时先挑一个文件，之后每处理完一个网站就当场写进去，几百兆也不会把内存撑爆。<br />
         同时干活的数量：后台同时开几个空壳页面一起搬，最多 20；网站少时会自动少开。调高不一定更快，还很吃内存。<br />
         干活时会在一个最小化窗口里开这些空壳页面，完事自己关掉，别手动去关它们。

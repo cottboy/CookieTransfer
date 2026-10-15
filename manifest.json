@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Cookie Transfer",
   "description": "Export and import all cookies, plus each site's local storage and IndexedDB, in one shot.",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "permissions": [
     "cookies",
     "storage",

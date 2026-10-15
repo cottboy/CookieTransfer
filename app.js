@@ -583,7 +583,7 @@ function makeFailureRecorder(limit) {
 
 // ---------- 页面里跑的两个大函数（会被转成文字送进页面，所以不能引用外面任何东西）----------
 
-async function pageDump() {
+async function pageDump(wantLocalStorage, wantIndexedDB) {
   if (typeof window.__ctPush !== "function") throw new Error("空壳页的推送通道没装上");
 
   const PUSH_SIZE = 512 * 1024; // 攒够这么多文字就推一次
@@ -801,23 +801,27 @@ async function pageDump() {
 
   push('{"origin":' + JSON.stringify(location.origin));
 
-  const pairs = Object.entries(localStorage);
-  push(',"localStorage":[');
-  for (let i = 0; i < pairs.length; i++) {
-    if (i) push(",");
-    push(JSON.stringify(pairs[i]));
+  if (wantLocalStorage) {
+    const pairs = Object.entries(localStorage);
+    push(',"localStorage":[');
+    for (let i = 0; i < pairs.length; i++) {
+      if (i) push(",");
+      push(JSON.stringify(pairs[i]));
+    }
+    push("]");
+    meta.localStorage = pairs.length;
   }
-  push("]");
-  meta.localStorage = pairs.length;
 
   let dbs = [];
-  try {
-    dbs = await indexedDB.databases();
-  } catch (e) {
-    meta.notes.push("这个网站的数据库清单读不了（普通网站才有）：" + e.message);
+  if (wantIndexedDB) {
+    try {
+      dbs = await indexedDB.databases();
+    } catch (e) {
+      meta.notes.push("这个网站的数据库清单读不了（普通网站才有）：" + e.message);
+    }
   }
-
-  push(',"indexedDB":[');
+  // 没勾上的那一样整段都不写进备份，读的时候当它没有
+  if (wantIndexedDB) push(',"indexedDB":[');
   let firstDb = true;
   for (const info of dbs) {
     let db;
@@ -879,7 +883,8 @@ async function pageDump() {
       if (db) db.close();
     }
   }
-  push("]}");
+  if (wantIndexedDB) push("]");
+  push("}");
 
   if (buf) {
     window.__ctPush(buf);
@@ -890,7 +895,7 @@ async function pageDump() {
   return meta;
 }
 
-async function pageRestore(expectChars) {
+async function pageRestore(expectChars, wantLocalStorage, wantIndexedDB) {
   const text = window.__CT_ACC;
   window.__CT_ACC = null;
   if (typeof text !== "string") throw new Error("没收到这个网站的备份内容");
@@ -988,12 +993,15 @@ async function pageRestore(expectChars) {
   const entry = JSON.parse(text);
   const result = { localStorage: 0, databases: 0, records: 0, notes: [] };
 
-  for (const [k, v] of entry.localStorage || []) {
-    localStorage.setItem(k, v);
-    result.localStorage++;
+  if (wantLocalStorage) {
+    for (const [k, v] of entry.localStorage || []) {
+      localStorage.setItem(k, v);
+      result.localStorage++;
+    }
   }
 
-  for (const d of entry.indexedDB || []) {
+  // 没勾上的那一样，备份里有也不往网站上写
+  for (const d of (wantIndexedDB ? entry.indexedDB || [] : [])) {
     try {
       await del(d.name);
       const db = await new Promise((res, rej) => {
@@ -1104,7 +1112,7 @@ async function pickFile(label) {
 
 // ---------- 导出网站数据：处理完一个网站就立刻写进文件 ----------
 
-async function runExport(payload) {
+async function runExport({ useBrowserList, manualText, kinds }) {
   const sink = await pickSaveFile(`site-data-export-${stamp()}.json`);
   if (!sink) return;
   sink.push(`{"format":${JSON.stringify(FORMAT)}}\n`);
@@ -1124,7 +1132,7 @@ async function runExport(payload) {
   }
 
   setStatus("正在清点要处理的网站……", false);
-  const origins = await buildOriginList(payload || {});
+  const origins = await buildOriginList({ useBrowserList, manualText });
   if (!origins.length) {
     await finishExport(sink, stats, failure, 0);
     setStatus("没有任何要处理的网站：既没勾选自动收集，也没填网址。", true);
@@ -1143,10 +1151,13 @@ async function runExport(payload) {
       captured.add(actual);
       inflight.set(shell, actual);
 
-      const meta = await shell.run(`(${pageDump.toString()})()`, { awaitPromise: true, timeout: JOB_TIMEOUT });
+      const meta = await shell.run(`(${pageDump.toString()})(${kinds.ls},${kinds.idb})`, {
+        awaitPromise: true,
+        timeout: JOB_TIMEOUT,
+      });
       const pieces = await collectParts(shell, meta.chars);
       for (const n of meta.notes || []) failure.add(actual + "：" + n);
-      if (meta.localStorage + meta.databases === 0) return; // 什么都没存的网站不写进备份
+      if (meta.localStorage + meta.databases === 0) return; // 没勾的那类数据不算：这个网站没什么可写的
 
       for (const p of pieces) sink.push(p);
       sink.push("\n");
@@ -1178,9 +1189,12 @@ async function runExport(payload) {
   }
 
   const tail = cancelRequested ? "（按了中止，已经跑完的都在文件里）" : "";
+  const written = [];
+  if (kinds.ls) written.push(`本地存储 ${fmtNum(stats.localStorageKeys)} 条`);
+  if (kinds.idb) written.push(`数据库 ${fmtNum(stats.databases)} 个（${fmtNum(stats.records)} 条记录）`);
   setStatus(
-    `导出完成${tail}：扫了 ${fmtNum(captured.size)} 个网站，其中 ${fmtNum(stats.sites)} 个真的存了东西。` +
-      `本地存储 ${fmtNum(stats.localStorageKeys)} 条，数据库 ${fmtNum(stats.databases)} 个（${fmtNum(stats.records)} 条记录）` +
+    `导出完成${tail}：扫了 ${fmtNum(captured.size)} 个网站，其中 ${fmtNum(stats.sites)} 个有你要搬的数据。` +
+      written.join("，") +
       (stats.blobBytes ? `，文件类数据约 ${fmtMB(stats.blobBytes)}` : "") +
       (failure.count ? `；有 ${fmtNum(failure.count)} 项没能处理${failure.count > FAILURE_LIMIT ? "（只留了前 " + FAILURE_LIMIT + " 条详情）" : ""}` : "") +
       "。",
@@ -1200,7 +1214,7 @@ async function finishExport(sink, stats, failure, scanned) {
 
 // ---------- 导入网站数据：一行一行读，读一行干一行 ----------
 
-async function runImport() {
+async function runImport(kinds) {
   const file = await pickFile("网站数据备份");
   if (!file) return;
 
@@ -1235,8 +1249,11 @@ async function runImport() {
       for (let i = 0, n = 0; i < text.length; i += FEED_SIZE, n++) {
         await shell.run((n ? "__CT_ACC += " : "window.__CT_ACC = ") + JSON.stringify(text.slice(i, i + FEED_SIZE)));
       }
-      const r = await shell.run(`(${pageRestore.toString()})(${text.length})`, { awaitPromise: true, timeout: JOB_TIMEOUT });
-      stats.sites++;
+      const r = await shell.run(`(${pageRestore.toString()})(${text.length},${kinds.ls},${kinds.idb})`, {
+        awaitPromise: true,
+        timeout: JOB_TIMEOUT,
+      });
+      if (r.localStorage + r.databases > 0) stats.sites++; // 你要搬的那类数据这条里一点都没有，就不算写回过一个网站
       stats.localStorageKeys += r.localStorage;
       stats.databases += r.databases;
       stats.records += r.records;
@@ -1319,9 +1336,12 @@ async function runImport() {
     await releaseWorkerWindow();
   }
 
+  const restored = [];
+  if (kinds.ls) restored.push(`本地存储 ${fmtNum(stats.localStorageKeys)} 条`);
+  if (kinds.idb) restored.push(`数据库 ${fmtNum(stats.databases)} 个（${fmtNum(stats.records)} 条记录）`);
   setStatus(
-    `导入完成：写回了 ${fmtNum(stats.sites)} 个网站。本地存储 ${fmtNum(stats.localStorageKeys)} 条，` +
-      `数据库 ${fmtNum(stats.databases)} 个（${fmtNum(stats.records)} 条记录）` +
+    `导入完成：只写你勾的那几样，写回了 ${fmtNum(stats.sites)} 个网站，` +
+      restored.join("，") +
       (failure.count ? `；有 ${fmtNum(failure.count)} 项没成功${failure.count > FAILURE_LIMIT ? "（只留前 " + FAILURE_LIMIT + " 条详情）" : ""}` : "") +
       (cancelRequested ? "（按了中止，没跑完的网址还在文件里，下次接着导就行）" : "") +
       "。",
@@ -1461,6 +1481,8 @@ async function withJob(label, fn) {
 const scopeInputs = {
   useBrowserList: { el: el("useBrowserList"), apply: (e, v) => (e.checked = v), value: (e) => e.checked },
   siteList: { el: el("siteList"), apply: (e, v) => (e.value = v), value: (e) => e.value },
+  wantLocalStorage: { el: el("wantLocalStorage"), apply: (e, v) => (e.checked = v), value: (e) => e.checked },
+  wantIndexedDB: { el: el("wantIndexedDB"), apply: (e, v) => (e.checked = v), value: (e) => e.checked },
   concurrency: {
     el: el("concurrency"),
     apply: (e, v) => (e.value = v),
@@ -1521,6 +1543,14 @@ chrome.storage.local.get(Object.keys(scopeInputs), (saved) => {
   }
 });
 
+// 网站数据要搬哪几样：两个都没勾就报一句，不开工
+function pickedKinds() {
+  const kinds = { ls: el("wantLocalStorage").checked, idb: el("wantIndexedDB").checked };
+  if (kinds.ls || kinds.idb) return kinds;
+  setStatus("先勾出要搬哪几样：LocalStorage 或 IndexedDB，至少勾一个，不然这个按钮不干活。", true);
+  return null;
+}
+
 if (MODE === "window") {
   myWindowId = (await chrome.windows.getCurrent()).id;
   await chrome.storage.session.set({ [WINDOW_KEY]: myWindowId });
@@ -1543,15 +1573,22 @@ if (MODE === "window") {
       if (text !== null) await runCookieImport(text);
     })
   );
-  el("exportDataBtn").addEventListener("click", () =>
+  el("exportDataBtn").addEventListener("click", () => {
+    const kinds = pickedKinds();
+    if (!kinds) return;
     withJob("导出网站数据", () =>
       runExport({
         useBrowserList: scopeInputs.useBrowserList.el.checked,
         manualText: scopeInputs.siteList.el.value,
+        kinds,
       })
-    )
-  );
-  el("importDataBtn").addEventListener("click", () => withJob("导入网站数据", runImport));
+    );
+  });
+  el("importDataBtn").addEventListener("click", () => {
+    const kinds = pickedKinds();
+    if (!kinds) return;
+    withJob("导入网站数据", () => runImport(kinds));
+  });
 } else {
   // 弹窗只是一个入口：挑文件、搬数据都得在独立窗口里点，弹窗一眨眼就被浏览器收走了
   el("detach").addEventListener("click", openWindow);
