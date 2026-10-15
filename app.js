@@ -574,7 +574,8 @@ async function pageDump() {
   if (typeof window.__ctPush !== "function") throw new Error("空壳页的推送通道没装上");
 
   const PUSH_SIZE = 512 * 1024; // 攒够这么多文字就推一次
-  const B64_CHUNK = 512 * 1024; // 文件类数据一次读这么多字节再转成文字
+  // 分块转 base64 的块大小必须是 3 的倍数：不然每一块都会补一个 "="，拼起来就解码不了
+  const B64_CHUNK = 512 * 1024 - ((512 * 1024) % 3);
   const ROW_BATCH_COUNT = 500; // 一批最多捞多少条记录
   const ROW_BATCH_BYTES = 4 * 1024 * 1024; // 一批最多捞多少字节
 
