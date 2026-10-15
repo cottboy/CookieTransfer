@@ -196,10 +196,10 @@
           LocalStorage（本地存储：网页自己记的小纸条）
         </label>
         <label class="kind">
-          <input type="checkbox" id="wantIndexedDB" checked />
+          <input type="checkbox" id="wantIndexedDB" />
           IndexedDB（网站数据库：里面存的记录、文件都算）
         </label>
-        <div class="hint">两个都不勾，点导出或导入不会开工。</div>
+        <div class="hint">默认只搬 LocalStorage；要连数据库、文件一起搬，就把 IndexedDB 勾上。两个都不勾，点导出或导入不会开工。</div>
       </div>
 
       <label id="scope">
