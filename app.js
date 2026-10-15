@@ -145,14 +145,26 @@ async function buildOriginList({ useBrowserList, manualText }) {
 
 const shellsByTab = new Map();
 let workerWindowId = null;
+let workerWindowTask = null; // 建窗口这件事同一时刻只让一个人干，其他人等它的结果
 
-async function ensureWorkerWindow() {
+// 干活窗口永远只有一个，里面按"同时干活的数量"开若干后台标签页。
+// 之前少了这把锁：几个工作循环同时发现"还没窗口"，就各建了一个，等于开了跟并发数一样多的窗口。
+function ensureWorkerWindow() {
+  if (!workerWindowTask) {
+    workerWindowTask = createWorkerWindow().finally(() => {
+      workerWindowTask = null;
+    });
+  }
+  return workerWindowTask;
+}
+
+async function createWorkerWindow() {
   if (workerWindowId != null) {
     try {
       await chrome.windows.get(workerWindowId);
       return workerWindowId;
     } catch {
-      workerWindowId = null;
+      workerWindowId = null; // 窗口已经被关了，重新开一个
     }
   }
   let win;
@@ -169,6 +181,7 @@ async function ensureWorkerWindow() {
 async function releaseWorkerWindow() {
   const id = workerWindowId;
   workerWindowId = null;
+  workerWindowTask = null;
   if (id != null) await chrome.windows.remove(id).catch(() => {});
 }
 
