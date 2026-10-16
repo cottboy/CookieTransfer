@@ -109,6 +109,16 @@ function originOf(rawUrl) {
   }
 }
 
+// 主机名得像个正经营业的名字：字母、数字、横线、下划线，一段一段用点隔开。
+// 中文域名、emoji 域名走到这里时已经被浏览器转成 xn-- 开头的形式了；IPv6 地址单独放行。
+const HOST_RE = /^[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?(\.[a-z0-9_]([a-z0-9_-]*[a-z0-9_])?)*$/;
+
+function hostLooksReal(host) {
+  if (!host) return false;
+  if (/^\[[0-9a-f:.]+\]$/.test(host)) return true;
+  return HOST_RE.test(host);
+}
+
 // 从 Cookie 里只能拿到域名，猜不到用哪个协议，所以 https 和 http 都列上
 function originsFromDomain(domain) {
   const host = (domain || "").replace(/^\./, "");
@@ -116,9 +126,27 @@ function originsFromDomain(domain) {
   return [`https://${host}`, `http://${host}`];
 }
 
+// 自己填的一行：带协议就按你写的协议来，不写就按 https；认不出来（写得不像网址）返回 null
+function manualOrigin(text) {
+  const line = String(text || "").trim();
+  if (!line) return null;
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(line) ? line : "https://" + line;
+  const origin = originOf(withScheme);
+  if (!origin) return null;
+  try {
+    return hostLooksReal(new URL(origin).hostname.toLowerCase()) ? origin : null;
+  } catch {
+    return null;
+  }
+}
+
+// 清单从三处凑：正在打开的标签、有 Cookie 的域名、浏览历史，外加自己填的那一坨。
+// 自己填的里面认不出来的行单独交回去，让调用方记一条失败，别不声不响地丢掉。
 async function buildOriginList({ useBrowserList, manualText }) {
   const list = [];
+  const rejected = [];
   const seen = new Set();
+  const badFound = new Set();
   const add = (origin) => {
     if (origin && !seen.has(origin)) {
       seen.add(origin);
@@ -126,10 +154,14 @@ async function buildOriginList({ useBrowserList, manualText }) {
     }
   };
 
-  for (const line of (manualText || "").split(/[\s,;]+/)) {
-    if (!line) continue;
-    const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(line) ? line : "https://" + line;
-    add(originOf(withScheme));
+  for (const piece of (manualText || "").split(/[\s,;]+/)) {
+    if (!piece) continue;
+    const origin = manualOrigin(piece);
+    if (origin) add(origin);
+    else if (!badFound.has(piece)) {
+      badFound.add(piece);
+      rejected.push(piece);
+    }
   }
 
   if (useBrowserList) {
@@ -138,7 +170,7 @@ async function buildOriginList({ useBrowserList, manualText }) {
     for (const v of await chrome.history.search({ text: "", startTime: 0, maxResults: 0 })) add(originOf(v.url));
   }
 
-  return list;
+  return { list, rejected };
 }
 
 // ---------- 空壳页面：地址是那个网站的、内容是本地现造的 ----------
@@ -1132,10 +1164,17 @@ async function runExport({ useBrowserList, manualText, kinds }) {
   }
 
   setStatus("正在清点要处理的网站……", false);
-  const origins = await buildOriginList({ useBrowserList, manualText });
+  const { list: origins, rejected } = await buildOriginList({ useBrowserList, manualText });
+  // 自己填的里面写得不像网址的行，不去碰它，但记一条失败，让你知道有行没算数
+  for (const bad of rejected) failure.add("自己填的这行没认成网站，没去碰它：" + bad);
   if (!origins.length) {
     await finishExport(sink, stats, failure, 0);
-    setStatus("没有任何要处理的网站：既没勾选自动收集，也没填网址。", true);
+    setStatus(
+      rejected.length
+        ? `你填的网址一行都没认成网站，所以没开工：认不出来的有 ${fmtNum(rejected.length)} 行，详情在下面的流水账里。`
+        : "没有任何要处理的网站：既没勾选自动收集，也没填网址。",
+      true
+    );
     return;
   }
 
@@ -1365,7 +1404,6 @@ function safeParse(text) {
 function enteredHost(text) {
   let s = String(text || "").trim().toLowerCase();
   if (!s) return null;
-  if (/[\u0000-\u0020\u007f]/.test(s)) return null; // 中间夹着空白、换行这类看不到的字符，说明这行写错了
   s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, ""); // 去掉 http:// 这种开头
   s = s.split("/")[0].split("?")[0].split("#")[0]; // 只留主机那一段
   s = s.replace(/^\*\./, "").replace(/^\.+/, "").replace(/\.+$/, ""); // 去掉前后的点
@@ -1376,9 +1414,7 @@ function enteredHost(text) {
   } catch {
     return null;
   }
-  if (/^\[[0-9a-f:.]+\]$/.test(host)) return host; // IPv6 地址
-  // 剩下的必须长得像个正经主机名：域名一段一段，头和尾不能是横线，乱七八糟的字符一律不要
-  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host) ? host : null;
+  return hostLooksReal(host) ? host : null;
 }
 
 // 把框里的文字拆成一批主机名：一行一个，空格、逗号、分号也当分隔；认不出来的那些丢掉

@@ -221,7 +221,7 @@
           placeholder="要导出 Cookies 的网址，一行一个，比如 example.com。上面选了“只要我填的网站”才看这里。"
         ></textarea>
         <div class="hint">
-          一行一个，写 example.com 就导这个网站的 Cookies；连子域名一起要，就把子域名也一行一个写上。重复、写错都不要紧。
+          一行一个，写 example.com 就行，不用加 http://，中文域名也认；连子域名一起要，就把子域名也一行一个写上。填重了会自动去重，写得不像网址的行会被跳过。
         </div>
       </div>
       <div class="row">
@@ -247,6 +247,9 @@
         自动收集浏览器里的网站（正在打开的、有 Cookie 的、历史访问过的）
       </label>
       <textarea id="siteList" placeholder="要迁移的网址，一行一个。留空就只用上面自动收集的。"></textarea>
+      <div class="hint">
+        自己填的不用加 http://，中文域名也认；填重了会自动去重。写得不像网址的行会跳过，并在下面的流水账里记一条。
+      </div>
 
       <label id="conc">
         同时干活的数量
