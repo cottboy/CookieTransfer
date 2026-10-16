@@ -1361,11 +1361,70 @@ function safeParse(text) {
 
 // ---------- Cookies ----------
 
+// 用户填的可能是网址，也可能只是域名：带不带 http://、带不带域名前面那个点、带不带后面的路径都行
+function enteredHost(text) {
+  let s = String(text || "").trim().toLowerCase();
+  if (!s) return null;
+  if (/[\u0000-\u0020\u007f]/.test(s)) return null; // 中间夹着空白、换行这类看不到的字符，说明这行写错了
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//, ""); // 去掉 http:// 这种开头
+  s = s.split("/")[0].split("?")[0].split("#")[0]; // 只留主机那一段
+  s = s.replace(/^\*\./, "").replace(/^\.+/, "").replace(/\.+$/, ""); // 去掉前后的点
+  if (!s) return null;
+  let host;
+  try {
+    host = new URL("https://" + s).hostname.toLowerCase(); // 交给浏览器去认
+  } catch {
+    return null;
+  }
+  if (/^\[[0-9a-f:.]+\]$/.test(host)) return host; // IPv6 地址
+  // 剩下的必须长得像个正经主机名：域名一段一段，头和尾不能是横线，乱七八糟的字符一律不要
+  return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(host) ? host : null;
+}
+
+// 把框里的文字拆成一批主机名：一行一个，空格、逗号、分号也当分隔；认不出来的那些丢掉
+function parseEnteredHosts(text) {
+  const hosts = new Set();
+  for (const piece of String(text || "").split(/[\s,;]+/)) {
+    const host = enteredHost(piece);
+    if (host) hosts.add(host);
+  }
+  return hosts;
+}
+
+// 这条 Cookie 算不算“我填的网站”的：域名一样就算；上级域名那种（.example.com）浏览这个网站时本来也会带上，所以也算
+function cookieBelongsTo(cookie, hosts) {
+  const domain = String((cookie && cookie.domain) || "").replace(/^\./, "").toLowerCase();
+  if (!domain) return false;
+  for (const host of hosts) {
+    if (host === domain || host.endsWith("." + domain)) return true;
+  }
+  return false;
+}
+
 async function runCookieExport() {
-  setStatus("正在读取全部 Cookies……", false);
-  const cookies = await chrome.cookies.getAll({});
+  // 选“只要我填的网站”时，先看框里有没有可用内容；一个能认出来的都没有就不开工
+  let hosts = null;
+  if (el("cookieSome").checked) {
+    hosts = parseEnteredHosts(el("cookieSiteList").value);
+    if (!hosts.size) {
+      setStatus("你选了“只要我填的网站”，但下面一个网址都没填出来：一行一个网址或域名，比如 example.com。", true);
+      return;
+    }
+  }
+
+  setStatus(hosts ? "正在读取这些网站的 Cookies……" : "正在读取全部 Cookies……", false);
+  const all = await chrome.cookies.getAll({});
+  const cookies = hosts ? all.filter((c) => cookieBelongsTo(c, hosts)) : all;
+
+  // 填的网站里一个 Cookie 都没有，多半是名字写错了：说清楚，不写个空文件糊弄人
+  if (hosts && !cookies.length) {
+    setStatus(`你填的 ${fmtNum(hosts.size)} 个网站里一个 Cookie 都没有，没有写出文件：看看网址是不是写错了。`, true);
+    return;
+  }
+
   const payload = {
     format: "cookie-transfer-v1",
+    scope: hosts ? "selected" : "all",
     exportedAt: new Date().toISOString(),
     cookieCount: cookies.length,
     cookies: cookies.map((c) => ({
@@ -1383,11 +1442,22 @@ async function runCookieExport() {
     })),
   };
 
+  // 填了却一个 Cookie 都没有的网站列出来（最多列 5 个），多半是网址写错了
+  const empty = hosts ? [...hosts].filter((h) => !all.some((c) => cookieBelongsTo(c, [h]))) : [];
+  const emptyText = empty.length
+    ? `填的里面 ${fmtNum(empty.length)} 个一个 Cookie 都没有：${empty.slice(0, 5).join("、")}${empty.length > 5 ? " 等" : ""}。`
+    : "";
+
   const sink = await pickSaveFile(`cookies-export-${stamp()}.json`);
   if (!sink) return;
   sink.push(JSON.stringify(payload, null, 2));
   await sink.close();
-  setStatus(`导出成功，共导出 ${fmtNum(cookies.length)} 个 Cookie，已写进你选的文件。`, false);
+  setStatus(
+    hosts
+      ? `导出成功：从你填的 ${fmtNum(hosts.size)} 个网站里筛出 ${fmtNum(cookies.length)} 个 Cookie（浏览器里一共 ${fmtNum(all.length)} 个），已写进你选的文件。${emptyText}`
+      : `导出成功，共导出 ${fmtNum(cookies.length)} 个 Cookie，已写进你选的文件。`,
+    false
+  );
 }
 
 // 选文件、读文字（Cookies 文件小，一次读干净就行）
@@ -1481,6 +1551,7 @@ async function withJob(label, fn) {
 const scopeInputs = {
   useBrowserList: { el: el("useBrowserList"), apply: (e, v) => (e.checked = v), value: (e) => e.checked },
   siteList: { el: el("siteList"), apply: (e, v) => (e.value = v), value: (e) => e.value },
+  cookieSiteList: { el: el("cookieSiteList"), apply: (e, v) => (e.value = v), value: (e) => e.value },
   wantLocalStorage: { el: el("wantLocalStorage"), apply: (e, v) => (e.checked = v), value: (e) => e.checked },
   wantIndexedDB: { el: el("wantIndexedDB"), apply: (e, v) => (e.checked = v), value: (e) => e.checked },
   concurrency: {
@@ -1537,10 +1608,18 @@ for (const [key, item] of Object.entries(scopeInputs)) {
   });
 }
 
-chrome.storage.local.get(Object.keys(scopeInputs), (saved) => {
+// Cookie 导出的范围是"全部"还是"只要我填的网站"，也记下来，下次打开还是上回的选择
+for (const id of ["cookieAll", "cookieSome"]) {
+  el(id).addEventListener("change", () => {
+    chrome.storage.local.set({ cookieScope: el("cookieSome").checked ? "some" : "all" });
+  });
+}
+
+chrome.storage.local.get([...Object.keys(scopeInputs), "cookieScope"], (saved) => {
   for (const [key, item] of Object.entries(scopeInputs)) {
     if (saved[key] !== undefined) item.apply(item.el, saved[key]);
   }
+  if (saved.cookieScope === "some") el("cookieSome").checked = true;
 });
 
 // 网站数据要搬哪几样：两个都没勾就报一句，不开工

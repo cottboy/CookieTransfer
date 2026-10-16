@@ -63,6 +63,21 @@
         resize: vertical;
       }
 
+      #cookieScope {
+        width: 260px;
+        margin: 6px auto;
+        text-align: left;
+        font-size: 12px;
+      }
+
+      #cookieSiteList {
+        width: 260px;
+        height: 60px;
+        margin: 4px 0;
+        font-size: 12px;
+        resize: vertical;
+      }
+
       #concurrency {
         width: 52px;
         margin-left: 6px;
@@ -147,13 +162,19 @@
       body[data-mode="window"] #scope,
       body[data-mode="window"] #conc,
       body[data-mode="window"] #kinds,
-      body[data-mode="window"] #siteList {
+      body[data-mode="window"] #cookieScope,
+      body[data-mode="window"] #siteList,
+      body[data-mode="window"] #cookieSiteList {
         width: 100%;
         box-sizing: border-box;
       }
 
       body[data-mode="window"] #siteList {
         height: 140px;
+      }
+
+      body[data-mode="window"] #cookieSiteList {
+        height: 90px;
       }
 
       /* 两种形态各自看不见的部分；元素都留在页面里，只是不显示 */
@@ -183,6 +204,25 @@
       <div class="row">
         <button id="exportBtn">导出Cookies</button>
         <button id="importBtn">导入Cookies</button>
+      </div>
+
+      <div id="cookieScope">
+        <div class="hint">导出 Cookies 要哪些网站的（只管导出，不影响导入）：</div>
+        <label class="kind">
+          <input type="radio" name="cookieScopeRadio" id="cookieAll" checked />
+          全部网站：浏览器里存着的 Cookies 全都导出
+        </label>
+        <label class="kind">
+          <input type="radio" name="cookieScopeRadio" id="cookieSome" />
+          只要我填的网站：只导出下面这些网站的 Cookies
+        </label>
+        <textarea
+          id="cookieSiteList"
+          placeholder="要导出 Cookies 的网址，一行一个，比如 example.com。上面选了“只要我填的网站”才看这里。"
+        ></textarea>
+        <div class="hint">
+          一行一个，写 example.com 就导这个网站的 Cookies；连子域名一起要，就把子域名也一行一个写上。重复、写错都不要紧。
+        </div>
       </div>
       <div class="row">
         <button id="exportDataBtn">导出网站数据</button>
